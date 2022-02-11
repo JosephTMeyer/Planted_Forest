@@ -10,14 +10,15 @@
 rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_try=0.4, variables=NULL, min_leaf_size=1, alternative=F, loss="L2", epsilon=0.1, categorical_variables=NULL, delta=0, cores=1){
   
   force(t_try)
+
+  Y=as.matrix(Y)
   
   p <- ncol(X)
-  n <- length(Y)
+  n <- nrow(X)
   eps <- 0.001*apply(X,2,function(s) min(diff(sort(unique(s)))))
   
   a <- apply(X,2,min)     ## lower bounds
   b <- apply(X,2,max) +eps    ### upper bounds
-  
   
   min_leaf_size<-rep(min_leaf_size,p)
   
@@ -27,19 +28,17 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
     max_categorical <- 2
   }
   
-  
   tree_fam <- function(run){
     library(Rcpp)
     sourceCpp("C-Code.cpp")
     subsample <- sample(n,n,replace=TRUE)
     
- 
-      X <- X[subsample,]
-      Y <- Y[subsample]
+    X <- X[subsample,]
+    Y <- Y[subsample,]
     
+    W <- matrix(1,n,ncol(Y))
     
-    W <- rep(1,n)
-    if (loss=="logit") W <- rep(0,n)
+    if (loss=="logit") W <- matrix(0,n,ncol(Y))
     
     # variables[[i]] is a vector of variables  in tree i
     if (is.null(variables)){
@@ -74,7 +73,7 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
     values=list()
     
     for(i in 1:length(variables)){
-      values[[i]]=0
+      values[[i]]=list(rep(0, ncol(Y)))
     }
     
     # individuals[[i]][[k]] is a vector of individuals in leaf k of tree i
@@ -160,61 +159,84 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
             I_1<-individuals[[Ikx_opt[1]]][[Ikx_opt[2]]][!is.element(X[individuals[[Ikx_opt[1]]][[Ikx_opt[2]]],Ikx_opt[3]],Ikx_opt[6:length(Ikx_opt)])]
           }
           
+          y_2 <- rep(0,ncol(Y))
+          y_1 <- rep(0,ncol(Y))
           
           if(loss=="median"){
-            y_2<-median(Y[I_2])
-            y_1<-median(Y[I_1])
             
-            Y[I_2] <- Y[I_2]-y_2
-            Y[I_1] <- Y[I_1]-y_1
+            for(i in 1:ncol(Y)){
+              
+              y_2[i]<-median(Y[I_2,i])
+              y_1[i]<-median(Y[I_1,i])
+              
+              Y[I_2,i] <- Y[I_2,i]-y_2[i]
+              Y[I_1,i] <- Y[I_1,i]-y_1[i]
+            }
           } else if (loss== "L1"|loss=="L2"){
             
-            y_2 <- mean(Y[I_2])
-            y_1 <- mean(Y[I_1])
-            
-            Y[I_2] <- Y[I_2]-y_2
-            Y[I_1] <- Y[I_1]-y_1
+            for(i in 1:ncol(Y)){
+              
+              y_2[i] <- mean(Y[I_2,i])
+              y_1[i] <- mean(Y[I_1,i])
+              
+              Y[I_2,i] <- Y[I_2,i]-y_2[i]
+              Y[I_1,i] <- Y[I_1,i]-y_1[i]  
+            }
           } else if(loss=="exponential"){
             
-            #          R21 = mean(((Y[I_1]+1)/2) *(W[I_1])/sum(W[I_1]))
-            #          R31 = mean(((Y[I_2]+1)/2) *(W[I_2])/sum(W[I_2]))
-            R21 = sum(((Y[I_1]+1)/2) *W[I_1])/sum(W[I_1])
-            R31 = sum(((Y[I_2]+1)/2) *W[I_2])/sum(W[I_2])
-            R21 = min(1-epsilon,max(epsilon,R21))
-            R31 = min(1-epsilon,max(epsilon,R31))
-            
-            if (sum(W[I_1])==0){
-              y_1 <- 0
-            } else{
-              y_1 <- log( R21/(1-R21))
+            for(i in 1:ncol(Y)){
+              
+              R21 = sum(((Y[I_1,i]+1)/2) *W[I_1,i])/sum(W[I_1,i])
+              R31 = sum(((Y[I_2,i]+1)/2) *W[I_2,i])/sum(W[I_2,i])
+              R22 = min(1-epsilon,max(epsilon,sum((Y[I_1,]+1)/2) *W[I_1,])/sum(W[I_1,]))
+              R32 = min(1-epsilon,max(epsilon,sum((Y[I_2,]+1)/2) *W[I_2,])/sum(W[I_2,]))
+              
+              if (sum(W[I_1,i])==0){
+                
+                y_1[i] <- 0
+                
+              } else{
+                
+                y_1[i] <- log( R21/(1-R22))
+              }
+              
+              W[I_1,i] <- W[I_1,i]*exp(-0.5*Y[I_1,i]*y_1[i])
+              
+              if (sum(W[I_2,i])==0){
+                
+                y_2[i] <- 0
+              
+              } else{
+                
+                y_2[i] <- log( R31/(1-R32))
+              }
+              
+              W[I_2,i] <- W[I_2,i]*exp(-0.5*Y[I_2,i]*y_2[i])
+              
+              
+              W[I_1,i][is.infinite(y_1[i])]<-0
+              W[I_2,i][is.infinite(y_2[i])]<-0
             }
-            W[I_1] <- W[I_1]*exp(-0.5*Y[I_1]*y_1)
             
-            if (sum(W[I_2])==0){
-              y_2 <- 0
-            } else{
-              y_2 <- log( R31/(1-R31))
-            }
-            W[I_2] <- W[I_2]*exp(-0.5*Y[I_2]*y_2)
-            
-            
-            W[I_1][is.infinite(y_1)]<-0
-            W[I_2][is.infinite(y_2)]<-0
           }  else if(loss=="logit"){
             
+            y_22 <- y_2
+            y_11 <- y_1
             
+            for(i in 1:ncol(Y)){
+              
+              y_22[i] <- min(1-epsilon,max(epsilon,mean(Y[I_2,i])))
+              y_11[i] <- min(1-epsilon,max(epsilon,mean(Y[I_1,i])))
+            }
             
-            y_22 <- min(1-epsilon,max(epsilon,mean(Y[I_2])))
-            y_11 <- min(1-epsilon,max(epsilon,mean(Y[I_1])))
-            
-            y_2 <-  log(y_22/(1-y_22)) - mean(W[I_2])
-            y_1 <-  log(y_11/(1-y_11)) - mean(W[I_1])
-            
-            W[I_1] <-   W[I_1] +y_1
-            W[I_2] <-   W[I_2] +y_2
-            
-            
-            
+            for(i in 1:ncol(Y)){
+              
+              y_2[i] <-  log(y_22[i]/(1-sum(y_22))) - mean(W[I_2,i])
+              y_1[i] <-  log(y_11[i]/(1-sum(y_11))) - mean(W[I_1,i])
+              
+              W[I_1,i] <-   W[I_1,i] +y_1[i]
+              W[I_2,i] <-   W[I_2,i] +y_2[i]
+            }
           }
           if(Ikx_opt[3] %in% variables[[Ikx_opt[1]]]){  ### if split variable is already in tree to be split
             
@@ -236,8 +258,14 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
               
               
             }
-            values[[Ikx_opt[1]]][length(individuals[[Ikx_opt[1]]])] <- values[[Ikx_opt[1]]][Ikx_opt[2]]+y_2
-            values[[Ikx_opt[1]]][Ikx_opt[2]] <- values[[Ikx_opt[1]]][Ikx_opt[2]]+y_1
+            
+            values[[Ikx_opt[1]]][[length(individuals[[Ikx_opt[1]]])]] <- rep(0,ncol(Y))
+            
+            for(i in 1:ncol(Y)){
+              
+              values[[Ikx_opt[1]]][[length(individuals[[Ikx_opt[1]]])]][i] <- values[[Ikx_opt[1]]][[Ikx_opt[2]]][i]+y_2[i]
+              values[[Ikx_opt[1]]][[Ikx_opt[2]]][i] <- values[[Ikx_opt[1]]][[Ikx_opt[2]]][i]+y_1[i]  
+            }
             
             if(alternative){
               
@@ -247,7 +275,7 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
                 
                 Y[individuals[[Ikx_opt[1]]][[j]]] <- Y[individuals[[Ikx_opt[1]]][[j]]]-y
                 
-                values[[Ikx_opt[1]]][j] <- values[[Ikx_opt[1]]][j]+y
+                values[[Ikx_opt[1]]][[j]] <- values[[Ikx_opt[1]]][[j]]+y
               }
             }
           } else {
@@ -278,8 +306,15 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
                     intervals[[i]][[length(individuals[[i]])-1]][1:length(Ikx_opt[6:length(Ikx_opt)]),Ikx_opt[3]] <- Ikx_opt[6:length(Ikx_opt)]
                     
                   }
-                  values[[i]][length(individuals[[i]])-1]=y_2
-                  values[[i]][length(individuals[[i]])]=y_1
+                  
+                  values[[i]][[length(individuals[[i]])-1]]<-rep(0,ncol(Y))
+                  values[[i]][[length(individuals[[i]])]]<-rep(0,ncol(Y))
+                  
+                  for(i_10 in 1:ncol(Y)){
+                    
+                    values[[i]][[length(individuals[[i]])-1]][i_10]=y_2[i_10]
+                    values[[i]][[length(individuals[[i]])]][i_10]=y_1[i_10]  
+                  }
                 }
               }
             }
@@ -338,13 +373,17 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
                 intervals[[length(intervals)]][[1]][1:length(Ikx_opt[6:length(Ikx_opt)]),Ikx_opt[3]] <- Ikx_opt[6:length(Ikx_opt)]
                 
               }
-              values[[length(variables)]] <- y_2
-              values[[length(variables)]][2] <- y_1
               
+              values[[length(variables)]]=list(rep(0,ncol(Y)),rep(0,ncol(Y)))
+              
+              for(i in 1:ncol(Y)){
+                
+                values[[length(variables)]][[1]][i] <- y_2[i]
+                values[[length(variables)]][[2]][i] <- y_1[i]  
+              }
             }
           }
         }
-        
       }
     }
     
@@ -353,11 +392,11 @@ rpf<- function(Y, X, max_interaction=2, ntrees=50, splits=30, split_try=10, t_tr
   
   if (cores ==1) forest_res <- sapply(1:ntrees, tree_fam) 
   else{ 
-      cl <- makeCluster(cores)
-      clusterExport(cl, varlist=ls(), envir=environment())
-      forest_res <- parSapply(cl, 1:ntrees, tree_fam)
-      stopCluster(cl)
-    }
+    cl <- makeCluster(cores)
+    clusterExport(cl, varlist=ls(), envir=environment())
+    forest_res <- parSapply(cl, 1:ntrees, tree_fam)
+    stopCluster(cl)
+  }
   # clusterExport
   # Y_hat=rep(0,n)
   # for(s in 1:ntrees){ Y_hat <- Y_hat + forest_res[[s]]$Y_hat }
